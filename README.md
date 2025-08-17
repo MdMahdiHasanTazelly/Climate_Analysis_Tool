@@ -13,8 +13,8 @@ As a project of CSE-425(Concept of Programming Language), we, a group of of 4, h
 ### Team Members
 1. Aiub Hossain Mahadi(mahadi131053@gmail.com)
 1. Md. Mahdi Hasan Tazelly(mahdihasantazelly@gmail.com)
-3. Taslia Zaman
-4. Konica Rabeya
+3. Taslia Zaman(tasliazaman81@gmail.com)
+4. Konica Rabeya(konica0807@gmail.com)
 
 ### Dataset:
 - [Global Warming Dataset](https://www.kaggle.com/datasets/ankushpanday1/global-warming-dataset-195-countries-1900-2023?resource=download) from Kaggle.

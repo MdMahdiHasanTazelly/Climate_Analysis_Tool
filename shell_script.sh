@@ -23,7 +23,9 @@ ask_and_save() {
         echo "Output saved to $output_file"
     fi
     echo "======= Results ======"
-    echo "$data"
+    # echo "$data"
+    head -n 1 "$FILE" | awk -F',' 'BEGIN {OFS=" | "} {print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14}'
+    echo "$data" | awk -F',' 'BEGIN {OFS=" | "} {print $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14}'
     echo -e "\n************** Runtime : $3 ms. **************\n"  # 3-> runtime(3rd param)
 }
 

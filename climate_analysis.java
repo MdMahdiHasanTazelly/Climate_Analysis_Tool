@@ -2,7 +2,7 @@ import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 
-public class java_script {
+public class climate_analysis {
     /* ---------- Data Model ---------- */
     static class Record {
         String country; int year;
@@ -187,7 +187,8 @@ public class java_script {
     /* ---------- Main: menu + runtimes ---------- */
     public static void main(String[] args){
         Scanner sc = new Scanner(System.in);
-        java_script app = new java_script();
+        //java_script app = new java_script();
+        climate_analysis app = new climate_analysis();
 
         // System.out.print("Enter CSV file path (e.g., global_warming_dataset.csv): ");
         // String path = sc.nextLine().trim();

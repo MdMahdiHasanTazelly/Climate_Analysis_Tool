@@ -163,7 +163,7 @@ delete_files(){
 while true; do
     echo -e "\n================== Climate Data Analysis Tool ==================\n"
     echo "1. Search by Country"
-    echo "2. Search by Year Range(1900-2023)"
+    echo "2. Search by Year Range(1950-2023)"
     echo "3. Find 5 Extreme weather countries"
     echo "4. High CO₂ Emitters"
     echo "5. Urbanization & Deforestation by Country"

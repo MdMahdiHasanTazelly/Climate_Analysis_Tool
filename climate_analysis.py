@@ -1,285 +1,371 @@
-import csv
-import sys
-from operator import itemgetter
+import csv, os, time
+from typing import Dict, List, Optional, Tuple, Any
 
-def _snake(s: str) -> str:
-    return (
-        s.strip()
-         .replace("/", " ")
-         .replace("-", " ")
-         .replace("%", "pct")
-         .replace(".", " ")
-         .replace("(", " ")
-         .replace(")", " ")
-         .replace(",", " ")
-         .lower()
-         .split()
+def safe_int(x: str) -> Optional[int]:
+    try:
+        if x is None: return None
+        x = x.strip()
+        if x == "" or x.lower() == "na": return None
+        return int(float(x))
+    except Exception:
+        return None
+
+def safe_float(x: str) -> Optional[float]:
+    try:
+        if x is None: return None
+        x = x.strip().replace(",", "")
+        if x == "" or x.lower() == "na": return None
+        return float(x)
+    except Exception:
+        return None
+
+def normalize_ws(s: str) -> str:
+    return " ".join(s.split()) if isinstance(s, str) else s
+
+def find_column(header: List[str], *candidates: str, contains_all: Tuple[str,...]=()) -> Optional[str]:
+    header_l = [h.strip() for h in header]
+    low = {h.lower(): h for h in header_l}
+    for cand in candidates:
+        if cand.lower() in low:
+            return low[cand.lower()]
+    if contains_all:
+        for h in header_l:
+            hl = h.lower()
+            if all(part in hl for part in contains_all):
+                return h
+    return None
+
+class Schema:
+    def __init__(self, country, year, co2, temp_anomaly, gdp, extreme_events, deforestation):
+        self.country = country
+        self.year = year
+        self.co2 = co2
+        self.temp_anomaly = temp_anomaly
+        self.gdp = gdp
+        self.extreme_events = extreme_events
+        self.deforestation = deforestation
+
+def detect_schema(headers: List[str]) -> Schema:
+    country = find_column(headers, "Country", "Entity")
+    year = find_column(headers, "Year")
+    co2 = find_column(headers, "CO2 Emissions", "CO2", contains_all=("co2",))
+    temp_anomaly = find_column(headers, "Temperature Anomaly", "Temp Anomaly", contains_all=("temperature", "anomaly"))
+    gdp = find_column(headers, "GDP", contains_all=("gdp",))
+    extreme_events = find_column(headers, "Extreme Events", "No. of Extreme Events", contains_all=("extreme", "event"))
+    deforestation = find_column(
+        headers,
+        "Deforestation_Rate",        
+        "Deforestation Rate",
+        "Deforestation",
+        "Forest Loss",
+        "Forest cover loss",
+        "Forest Area Loss"
     )
 
-def to_snake_case(s: str) -> str:
-    return "_".join(_snake(s))
+    return Schema(country, year, co2, temp_anomaly, gdp, extreme_events, deforestation)
 
-HEADER_ALIASES = {
-    "country": "country",
-    "nation": "country",
+class ClimateData:
+    def __init__(self, rows: List[Dict[str,Any]], schema: Schema):
+        self.rows = rows
+        self.schema = schema
+        self.by_country: Dict[str, List[Dict[str,Any]]] = {}
+        self.by_year: Dict[int, List[Dict[str,Any]]] = {}
+        self._build_indexes()
 
-    "year": "year",
+    def _build_indexes(self):
+        ccol, ycol = self.schema.country, self.schema.year
+        for r in self.rows:
+            c = normalize_ws(r.get(ccol,"")) or ""
+            y = safe_int(str(r.get(ycol)))
+            if c: self.by_country.setdefault(c.lower(),[]).append(r)
+            if y is not None: self.by_year.setdefault(y,[]).append(r)
 
-    "temperature_anomaly": "temperature_anomaly",
-    "temperature_anamoly": "temperature_anomaly",
-    "temp_anomaly": "temperature_anomaly",
-    "temperature_change": "temperature_anomaly",
+    @staticmethod
+    def from_csv(path: str):
+        with open(path, newline="", encoding="utf-8") as f:
+            rdr = csv.DictReader(f)
+            schema = detect_schema(rdr.fieldnames or [])
+            rows=[]
+            for raw in rdr:
+                row={k:v for k,v in raw.items()}
+                if schema.year in row: row[schema.year]=safe_int(row[schema.year])
+                if schema.co2 and schema.co2 in row: row[schema.co2]=safe_float(row[schema.co2])
+                if schema.temp_anomaly and schema.temp_anomaly in row: row[schema.temp_anomaly]=safe_float(row[schema.temp_anomaly])
+                if schema.gdp and schema.gdp in row: row[schema.gdp]=safe_float(row[schema.gdp])
+                if schema.extreme_events and schema.extreme_events in row: row[schema.extreme_events]=safe_float(row[schema.extreme_events])
+                if schema.deforestation and schema.deforestation in row: row[schema.deforestation]=safe_float(row[schema.deforestation])
+                if schema.country in row and isinstance(row[schema.country],str):
+                    row[schema.country]=normalize_ws(row[schema.country])
+                rows.append(row)
+        return ClimateData(rows,schema)
 
-    "co2_emissions": "co2_emissions",
-    "co₂_emissions": "co2_emissions",
-    "co2": "co2_emissions",
-    "co2_emission": "co2_emissions",
-    "co2_emissions_mt": "co2_emissions",
 
-    "gdp": "gdp",
-    "gdp_usd": "gdp",
-    "gdp_current_us$": "gdp",
-
-    "extreme_weather_events": "extreme_weather_events",
-    "extreme_events": "extreme_weather_events",
-    "extreme_weather": "extreme_weather_events",
-
-    "population": "population",
-}
-
-INT_FIELDS = {"year"}
-FLOAT_FIELDS = {
-    "temperature_anomaly",
-    "co2_emissions",
-    "gdp",
-    "extreme_weather_events",
-    "population",
-}
-
-def canonical_key(raw_key: str) -> str:
-    k = to_snake_case(raw_key)
-    return HEADER_ALIASES.get(k, k)
-
-def parse_value(key: str, val: str):
-    if val is None:
-        return 0
-    v = val.strip()
-    if v == "" or v.lower() in {"na", "n/a", "null"}:
-        return 0
-    try:
-        if key in INT_FIELDS:
-            return int(float(v))
-        if key in FLOAT_FIELDS:
-            return float(v)
-    except ValueError:
-        return 0
-    return v
-class ClimateDataProcessor:
-    def __init__(self, filename: str):
-        self.data = []
-        self._load_data(filename)
-
-    def _load_data(self, filename: str):
-        
-          with open(filename, "r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                rec = {}
-                for k, v in row.items():
-                    ck = canonical_key(k)
-                    rec[ck] = parse_value(ck, v)
-        
-                rec.setdefault("country", "")
-                rec.setdefault("year", 0)
-                rec.setdefault("temperature_anomaly", 0.0)
-                rec.setdefault("co2_emissions", 0.0)
-                rec.setdefault("gdp", 0.0)
-                rec.setdefault("extreme_weather_events", 0.0)
-                rec.setdefault("population", 0.0)
-                self.data.append(rec)
-
-    def search_by_country(self, country: str):
-    
-        return [r for r in self.data if r["country"].lower() == country.lower()]
-
-    def search_by_year_range(self, start_year: int, end_year: int):
-    
-        return [r for r in self.data if start_year <= r["year"] <= end_year]
-
-    def find_extreme_events(self, count: int = 10, highest: bool = True):
-      
-        totals = {}
-        for r in self.data:
-            c = r["country"]
-            totals[c] = totals.get(c, 0.0) + (r.get("extreme_weather_events", 0.0) or 0.0)
-        items = list(totals.items())
-        items.sort(key=itemgetter(1), reverse=highest)
-        return items[:count]
-
-    def find_high_co2_emitters(self, year: int, count: int = 10):
-        year_rows = [r for r in self.data if r["year"] == year]
-        year_rows.sort(key=lambda r: r["co2_emissions"], reverse=True)
-        return [(r["country"], r["co2_emissions"]) for r in year_rows[:count]]
-
-    def sort_by_temperature_anomaly(self, ascending: bool = True):
-        """O(N log N)"""
-        return sorted(self.data, key=lambda r: r["temperature_anomaly"], reverse=not ascending)
-
-    def sort_by_gdp(self, year: int, ascending: bool = True):
-        """O(K log K) where K = rows for that year"""
-        year_rows = [r for r in self.data if r["year"] == year]
-        return sorted(year_rows, key=lambda r: r["gdp"], reverse=not ascending)
-
-    def average_metrics(self, country: str, metrics: list[str]):
-        """O(M) where M = #rows for country"""
-        rows = self.search_by_country(country)
-        if not rows:
-            return None
-        n = len(rows)
-        out = {}
-        for m in metrics:
-            key = canonical_key(m)
-            total = sum((r.get(key, 0) or 0) for r in rows)
-            out[key] = total / n if n else 0.0
-        return out
-
-def print_table(rows, max_rows=10, columns=None, title=None):
-    if title:
-        print(f"\n=== {title} ===")
+def print_table(rows: List[Tuple[Any,...]], headers: Tuple[str,...]):
     if not rows:
-        print("No results.\n")
+        print("No results.")
         return
-    if isinstance(rows[0], dict):
-        cols = columns or list(rows[0].keys())
-        print(" | ".join(cols))
-        print("-" * (len(" | ".join(cols)) + 2))
-        for r in rows[:max_rows]:
-            print(" | ".join(str(r.get(c, "")) for c in cols))
-        if len(rows) > max_rows:
-            print(f"... ({len(rows)-max_rows} more)")
-    else:
-        for r in rows[:max_rows]:
-            print(r)
-        if len(rows) > max_rows:
-            print(f"... ({len(rows)-max_rows} more)")
-    print()
+    widths=[len(h) for h in headers]
+    for r in rows:
+        for i,cell in enumerate(r):
+            widths[i]=max(widths[i],len(f"{cell}"))
+    def fmt_row(cells): return " | ".join(f"{str(cells[i]):<{widths[i]}}" for i in range(len(headers)))
+    print(fmt_row(headers))
+    print("-+-".join("-"*w for w in widths))
+    for r in rows: print(fmt_row(r))
 
-def print_kv(d: dict, title=None):
-    if title:
-        print(f"\n=== {title} ===")
-    if not d:
-        print("No results.\n")
-        return
-    for k, v in d.items():
-        if isinstance(v, float):
-            print(f"{k}: {v:.4f}")
-        else:
-            print(f"{k}: {v}")
-    print()
+def print_kv_table(items: List[Tuple[str,float]], key_header: str, val_header: str):
+    rows=[(k, f"{v:.6g}") for k,v in items]
+    print_table(rows,(key_header,val_header))
 
-def main():
-    # default_csv = "global_warming_dataset.csv"
-    # path = input(f"CSV path [{default_csv}]: ").strip() or default_csv
-    path = "data.csv"
-    try:
-        proc = ClimateDataProcessor(path)
-    except FileNotFoundError:
-        print(f"File not found: {path}")
-        sys.exit(1)
-    MENU = """
-Climate Data Processing System
-------------------------------
-1) Search by Country
-2) Search by Year Range
-3) Top/Bottom countries by Extreme Weather Events (total)
-4) Top-N CO2 emitters in a given Year
-5) Sort by Temperature Anomaly (asc/desc)
-6) Sort by GDP for a given Year (asc/desc)
-7) Average metrics for a Country
-0) Exit
-"""
+def search_by_country(data, name): 
+    return data.by_country.get(name.strip().lower(),[])
+
+def search_by_year_range(data, start, end):
+    out=[]
+    for y in range(start,end+1):
+        out.extend(data.by_year.get(y,[]))
+    return out
+
+def find_extreme_events_max(data, year=None, top=10):
+    col=data.schema.extreme_events; ccol=data.schema.country
+    if not col: 
+        raise ValueError("Extreme Events column not found.")
+    agg={}
+    rows=data.by_year.get(year,[]) if year else data.rows
+    for r in rows:
+        c=r.get(ccol); v=r.get(col)
+        if c and isinstance(v,(int,float)):
+            agg[c]=agg.get(c,0)+float(v)
+    return sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:top]
+
+def find_extreme_events_min(data, year=None, top=10):
+    col=data.schema.extreme_events; ccol=data.schema.country
+    if not col: 
+        raise ValueError("Extreme Events column not found.")
+    agg={}
+    rows=data.by_year.get(year,[]) if year else data.rows
+    for r in rows:
+        c=r.get(ccol); v=r.get(col)
+        if c and isinstance(v,(int,float)):
+            agg[c]=agg.get(c,0)+float(v)
+    return sorted(agg.items(), key=lambda kv: kv[1])[:top]
+
+def find_high_co2(data, year, top=10):
+    col=data.schema.co2; ccol=data.schema.country
+    if not col: 
+        raise ValueError("CO2 column not found.")
+    out=[]
+    for r in data.by_year.get(year,[]):
+        c=r.get(ccol); v=r.get(col)
+        if c and isinstance(v,(int,float)): out.append((c,float(v)))
+    return sorted(out,key=lambda kv: kv[1],reverse=True)[:top]
+
+def urban_deforestation(data, year, top=10, mode="max"):
+    
+    if not data.schema.deforestation:
+        raise ValueError("Dataset has no deforestation column")
+    col=data.schema.deforestation; ccol=data.schema.country
+    out=[]
+    for r in data.by_year.get(year,[]):
+        c=r.get(ccol); v=r.get(col)
+        if c and isinstance(v,(int,float)): out.append((c,float(v)))
+    out.sort(key=lambda kv: kv[1], reverse=(mode=="max"))
+    return out[:top]
+
+def sort_by_temp_anomaly_asc(data, year, top=None):
+    col=data.schema.temp_anomaly; ccol=data.schema.country
+    if not col: 
+        raise ValueError("Temperature Anomaly column not found.")
+    buckets={}
+    for r in data.by_year.get(year,[]):
+        c=r.get(ccol); v=r.get(col)
+        if c and isinstance(v,(int,float)): buckets.setdefault(c,[]).append(float(v))
+    out=[(c,sum(vs)/len(vs)) for c,vs in buckets.items()]
+    out.sort(key=lambda kv: kv[1])
+    return out[:top] if top else out
+
+def sort_by_temp_anomaly_desc(data, year, top=None):
+    out=sort_by_temp_anomaly_asc(data,year)
+    out.sort(key=lambda kv: kv[1],reverse=True)
+    return out[:top] if top else out
+
+def sort_by_gdp_asc(data, year, top=None):
+    col=data.schema.gdp; ccol=data.schema.country
+    if not col: 
+        raise ValueError("GDP column not found.")
+    buckets={}
+    for r in data.by_year.get(year,[]):
+        c=r.get(ccol); v=r.get(col)
+        if c and isinstance(v,(int,float)): buckets.setdefault(c,[]).append(float(v))
+    out=[(c,sum(vs)/len(vs)) for c,vs in buckets.items()]
+    out.sort(key=lambda kv: kv[1])
+    return out[:top] if top else out
+
+def sort_by_gdp_desc(data, year, top=None):
+    out=sort_by_gdp_asc(data,year)
+    out.sort(key=lambda kv: kv[1],reverse=True)
+    return out[:top] if top else out
+
+def average_metrics(data, country):
+    rows=search_by_country(data,country)
+    if not rows: return []
+    metrics={}
+    for r in rows:
+        for col in (data.schema.co2,data.schema.temp_anomaly,data.schema.gdp,data.schema.extreme_events,data.schema.deforestation):
+            if col and isinstance(r.get(col),(int,float)):
+                metrics.setdefault(col,[]).append(float(r[col]))
+    return [(col,sum(vs)/len(vs)) for col,vs in metrics.items()]
+
+
+def autodetect_csv_in_same_folder():
+    folder=os.path.dirname(__file__)
+    csvs=[f for f in os.listdir(folder) if f.lower().endswith(".csv")]
+    return os.path.join(folder,csvs[0]) if csvs else None
+
+def interactive_menu():
+    print("=== Climate Analysis (11 functions) ===")
+    # csv_path = input("Path to dataset CSV (Enter if same folder): ").strip()
+    csv_path = 'data.csv'
+    if not csv_path:
+        auto = autodetect_csv_in_same_folder()
+        if not auto:
+            print("No CSV found.")
+            return
+        csv_path = auto
+        print(f"Using {csv_path}")
+    data = ClimateData.from_csv(csv_path)
 
     while True:
-        print(MENU)
-        choice = input("Choose an option: ").strip()
-
-        if choice == "1":
-            country = input("Country: ").strip()
-            rows = proc.search_by_country(country)
-            print_table(rows, max_rows=10, columns=["country", "year", "temperature_anomaly", "co2_emissions", "gdp", "extreme_weather_events", "population"],
-                        title=f"Records for {country}")
-
-        elif choice == "2":
-            try:
-                s = int(input("Start year: ").strip())
-                e = int(input("End year: ").strip())
-            except ValueError:
-                print("Invalid year(s).")
-                continue
-            rows = proc.search_by_year_range(s, e)
-            print_table(rows, max_rows=10, columns=["country", "year", "temperature_anomaly", "co2_emissions", "gdp", "extreme_weather_events"],
-                        title=f"Records from {s} to {e}")
-
-        elif choice == "3":
-            try:
-                n = int(input("How many countries to list? (e.g., 10): ").strip())
-            except ValueError:
-                print("Invalid number.")
-                continue
-            hb = input("Highest or Lowest? [h/l]: ").strip().lower() or "h"
-            highest = hb.startswith("h")
-            items = proc.find_extreme_events(count=n, highest=highest)
-            title = ("Top" if highest else "Bottom") + f" {n} by Extreme Weather Events (sum across years)"
-            print_table(items, title=title)
-
-        elif choice == "4":
-            try:
-                year = int(input("Year: ").strip())
-                n = int(input("Top N (e.g., 10): ").strip())
-            except ValueError:
-                print("Invalid input.")
-                continue
-            items = proc.find_high_co2_emitters(year=year, count=n)
-            print_table(items, title=f"Top {n} CO2 Emitters in {year}")
-
-        elif choice == "5":
-            order = input("Ascending or Descending? [a/d]: ").strip().lower() or "d"
-            asc = order.startswith("a")
-            rows = proc.sort_by_temperature_anomaly(ascending=asc)
-            print_table(
-                [(r["country"], r["year"], r["temperature_anomaly"]) for r in rows],
-                title=f"Sorted by Temperature Anomaly ({'asc' if asc else 'desc'})",
-            )
-
-        elif choice == "6":
-            try:
-                year = int(input("Year: ").strip())
-            except ValueError:
-                print("Invalid year.")
-                continue
-            order = input("Ascending or Descending? [a/d]: ").strip().lower() or "d"
-            asc = order.startswith("a")
-            rows = proc.sort_by_gdp(year=year, ascending=asc)
-            print_table(
-                [(r["country"], r["gdp"]) for r in rows],
-                title=f"GDP in {year} ({'asc' if asc else 'desc'})"
-            )
-
-        elif choice == "7":
-            country = input("Country: ").strip()
-        
-            metrics = ["co2_emissions", "temperature_anomaly", "gdp"]
-            avg = proc.average_metrics(country, metrics)
-            if avg is None:
-                print("Country not found.\n")
-            else:
-                print_kv(avg, title=f"Average metrics for {country}")
-
-        elif choice == "0":
-            print("Bye!")
+        print("\nChoose option:")
+        print("1) search_by_country")
+        print("2) search_by_year_range")
+        print("3) find_extreme_events_max")
+        print("4) find_extreme_events_min")
+        print("5) find_high_co2")
+        print("6) urban_deforestation")
+        print("7) sort_by_temp_anomaly_asc")
+        print("8) sort_by_temp_anomaly_desc")
+        print("9) sort_by_gdp_asc")
+        print("10) sort_by_gdp_desc")
+        print("11) average_metrics")
+        print("0) Exit")
+        choice = input("Choice: ").strip()
+        if choice == "0":
             break
-        else:
-            print("Invalid option. Try again.")
 
-if __name__ == "__main__":
-    main()
+        try:
+            if choice == "1":
+                name = input("Country: ")
+                t0 = time.time()
+                rows = search_by_country(data, name)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                cols = [
+                    c for c in [
+                        data.schema.country,
+                        data.schema.year,
+                        data.schema.co2,
+                        data.schema.temp_anomaly,
+                        data.schema.gdp,
+                        data.schema.extreme_events,
+                        data.schema.deforestation
+                    ] if c
+                ]
+                out = [tuple(r.get(c, "") for c in cols) for r in rows[:20]]
+                print_table(out, tuple(cols))
+
+            elif choice == "2":
+                s = int(input("Start year: "))
+                e = int(input("End year: "))
+                t0 = time.time()
+                rows = search_by_year_range(data, s, e)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print(f"Found {len(rows)} rows")
+
+            elif choice == "3":
+                y = input("Year(blank=all): ")
+                yv = int(y) if y else None
+                t0 = time.time()
+                items = find_extreme_events_max(data, yv, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "Extreme Events Max")
+
+            elif choice == "4":
+                y = input("Year(blank=all): ")
+                yv = int(y) if y else None
+                t0 = time.time()
+                items = find_extreme_events_min(data, yv, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "Extreme Events Min")
+
+            elif choice == "5":
+                y = int(input("Year: "))
+                t0 = time.time()
+                items = find_high_co2(data, y, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "CO2")
+
+            elif choice == "6":
+                y = int(input("Year: ").strip())
+                top = input("Top N (blank=10): ").strip()
+                topv = int(top) if top else 10
+                mode = input("Mode (max/min, blank=max): ").strip().lower() or "max"
+                if mode not in ("max", "min"):
+                    print("Invalid mode; use 'max' or 'min'.")
+                    continue
+                t0 = time.time()
+                items = urban_deforestation(data, year=y, top=topv, mode=mode)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                metric_name = data.schema.deforestation or "Deforestation"
+                print_kv_table(items, "Country", f"{metric_name} ({mode}) in {y}")
+
+            elif choice == "7":
+                y = int(input("Year: "))
+                t0 = time.time()
+                items = sort_by_temp_anomaly_asc(data, y, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "Temp Anomaly ASC")
+
+            elif choice == "8":
+                y = int(input("Year: "))
+                t0 = time.time()
+                items = sort_by_temp_anomaly_desc(data, y, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "Temp Anomaly DESC")
+
+            elif choice == "9":
+                y = int(input("Year: "))
+                t0 = time.time()
+                items = sort_by_gdp_asc(data, y, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "GDP ASC")
+
+            elif choice == "10":
+                y = int(input("Year: "))
+                t0 = time.time()
+                items = sort_by_gdp_desc(data, y, 10)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_kv_table(items, "Country", "GDP DESC")
+
+            elif choice == "11":
+                name = input("Country: ")
+                t0 = time.time()
+                items = average_metrics(data, name)
+                t1 = time.time()
+                print(f"[Runtime] {t1 - t0:.3f}s")
+                print_table([(k, f"{v:.6g}") for k, v in items], ("Metric", "Average"))
+
+        except Exception as e:
+            print("Error:", e)
+
+if __name__=="__main__":
+    interactive_menu()

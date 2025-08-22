@@ -17,7 +17,7 @@ ask_and_save() {
     read -p "Do you want to save this output as CSV? (y/n): " save_choice
     if [[ "$save_choice" == "y" || "$save_choice" == "Y" ]]; then
         {
-            head -n 1 "$FILE"
+            head 1 "$FILE"  #update (removed -n)
             echo "$data"
         } > "$output_file"
         echo "Output saved to $output_file"
@@ -53,7 +53,7 @@ search_by_year_range() {
 #Finds top 5 Extreme weather countries
 find_extreme_events() {
     read -p "Find (max/min): " type
-    if [ "$type" == "max" ]; then
+    if [[ "$type" == "max" ]]; then
         start=$(date +%s%N)  # runtime calculation starts
         result=$(tail -n +2 "$FILE" | sort -t',' -k14 -nr | head -n 5)
         end=$(date +%s%N) #runtime calculation ensd
@@ -90,7 +90,7 @@ urban_deforestation() {
 #Sort by Temperature Anomaly
 sort_by_temp_anomaly() {
     read -p "Ascending or Descending (asc/desc): " order
-    if [ "$order" == "asc" ]; then
+    if [[ "$order" == "asc" ]]; then
         start=$(date +%s%N)  # runtime calculation starts
         result=$(tail -n +2 "$FILE" | sort -t',' -k3 -n)
         end=$(date +%s%N) #runtime calculation ensd
@@ -108,7 +108,7 @@ sort_by_gdp() {
     read -p "Enter year: " year
     read -p "Ascending or Descending (asc/desc): " order
     data=$(awk -F',' -v y="$year" 'NR>1 && $2 == y' "$FILE")
-    if [ "$order" == "asc" ]; then
+    if [[ "$order" == "asc" ]]; then
         start=$(date +%s%N)  # runtime calculation starts
         result=$(echo "$data" | sort -t',' -k7 -n)
         end=$(date +%s%N) #runtime calculation ensd
